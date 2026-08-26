@@ -1,0 +1,10 @@
+Simulating 500 sessions (seed=42)...
+Wrote sessions/notes/note_prices to C:\Users\Manas\Downloads\Total Job Application process flow\projects\treasury-basis-implied-repo-monitor\data\sessions.db
+Engine computed results for 500 sessions.
+Total (session, note) result rows: 3500
+Distinct notes with results: 7 / 7 in basket
+Expected rows if every issue is covered every session: 3500
+Coverage claim (every issue, every session): True
+Sessions with exactly one CTD flagged: check -> 500 (should equal 500)
+Max |invoice_dirty - (futures_price*CF + accrued_delivery)| across all rows: 0.00e+00
+Net basis range across all rows: -60.866 to 55.699 ticks

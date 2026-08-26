@@ -1,0 +1,7 @@
+Funding shock applied: +25bp on the overnight repo rate
+Observations (session x note): 3500 across 500 sessions
+
+Median net basis shift, all (session, note) observations: 1.0774 ticks
+Median of per-session medians across the basket: 1.0815 ticks
+Mean net basis shift, all observations: 1.0515 ticks
+Min / max shift observed: 0.0211 / 2.1061 ticks

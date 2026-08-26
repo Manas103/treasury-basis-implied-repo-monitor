@@ -1,0 +1,10 @@
+Total sessions checked: 500
+Independent oracle CTD matches main engine CTD: 500/500
+Mismatches: 0
+
+5 closest implied-repo margins between the CTD pick and the runner-up (most numerically sensitive sessions):
+  session 190: margin = 0.000461 (annualized implied repo rate, decimal)
+  session 456: margin = 0.000484 (annualized implied repo rate, decimal)
+  session 196: margin = 0.000572 (annualized implied repo rate, decimal)
+  session 465: margin = 0.000572 (annualized implied repo rate, decimal)
+  session 450: margin = 0.000574 (annualized implied repo rate, decimal)

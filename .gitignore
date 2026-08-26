@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+*.log
+
+# regenerable simulation database, rebuild with: python scripts/run_simulation.py
+data/*.db
