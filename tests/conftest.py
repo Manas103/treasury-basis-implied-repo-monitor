@@ -9,7 +9,9 @@ import pytest
 
 from treasury_monitor import db as db_module
 from treasury_monitor import market_sim
+from treasury_monitor import rates_market_sim
 from treasury_monitor.engine import run_engine
+from treasury_monitor.screener import run_screener
 
 
 @pytest.fixture
@@ -20,6 +22,22 @@ def small_db(tmp_path):
     market_sim.populate_db(db_path=db_path, num_sessions=40, seed=7)
     conn = db_module.connect(db_path)
     run_engine(conn)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def screened_db(tmp_path):
+    """A small (120-session) basis database with the swap curve and
+    Treasury yields simulated and the screener already run, for the
+    screener's own unit tests. 120 sessions is the smallest size that
+    clears the screener's 60-session rolling window with room to spare."""
+    db_path = tmp_path / "screened_sessions.db"
+    market_sim.populate_db(db_path=db_path, num_sessions=120, seed=7)
+    conn = db_module.connect(db_path)
+    run_engine(conn)
+    rates_market_sim.populate_rates(conn, num_sessions=120)
+    run_screener(conn)
     yield conn
     conn.close()
 

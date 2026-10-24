@@ -1,0 +1,11 @@
+Simulating 500 basis sessions (seed=42)...
+Basis engine computed results for 500 sessions.
+Simulating swap curve (14 tenors) and 2/5/10/30y Treasury yields (seed=4201)...
+Running screener: rolling window 60 sessions, |z| >= 2.0, half-spread 1.5bp + repo carry (60d holding, 0.15 coeff)...
+Sessions: 500
+Series screened: 5 (swap_spread_2, swap_spread_5, swap_spread_10, swap_spread_30, invoice_spread_10)
+Two-sigma dislocations flagged: 321
+Dislocations surviving half-spread + repo-carry filter: 170
+Survival rate: 170/321 (53.0%)
+Max swap curve input repricing error across 3 sampled sessions, all 14 tenors: 0.000000bp
+Max |leg_a_dv01 - leg_b_dv01| after DV01-neutral sizing, session 499, all 5 series: 1.78e-15

@@ -1,5 +1,5 @@
 Simulating 500 sessions (seed=42)...
-Wrote sessions/notes/note_prices to C:\Users\Manas\Downloads\Total Job Application process flow\projects\treasury-basis-implied-repo-monitor\data\sessions.db
+Wrote sessions/notes/note_prices to C:\Users\Manas\Downloads\Auto Job Applier\Total Job Application process flow\projects\treasury-basis-implied-repo-monitor\data\sessions.db
 Engine computed results for 500 sessions.
 Total (session, note) result rows: 3500
 Distinct notes with results: 7 / 7 in basket

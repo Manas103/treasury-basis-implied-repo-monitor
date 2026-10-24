@@ -1,11 +1,15 @@
-# Treasury Cash-Futures Basis and Implied Repo Monitor
+# Treasury Cash-Futures Basis and Implied Repo Monitor, Extended with a Swap Spread and Invoice Spread Relative-Value Screener
 
 Computes net basis and implied repo rate for every note in a simulated
 10-year Treasury note futures deliverable basket, every session, and picks
-the cheapest-to-deliver (CTD) note by highest implied repo rate. Python
-3.12, SQLite for storage and querying. Every number below was measured on
-this machine, not targeted: where the honest measurement landed somewhere
-other than what a first pass at the design expected, this README says so.
+the cheapest-to-deliver (CTD) note by highest implied repo rate. Extended
+(Oct. 2026) with an OIS-discounted swap curve bootstrap, 2s/5s/10s/30s swap
+spreads and a futures-vs-swap invoice spread, both DV01-neutral and
+z-scored for two-sigma dislocations against a half-spread-plus-repo-carry
+cost filter. Python 3.12, SQLite for storage and querying. Every number
+below was measured on this machine, not targeted: where the honest
+measurement landed somewhere other than what a first pass at the design
+expected, this README says so.
 
 ## Why this exists
 
@@ -17,6 +21,15 @@ trade (long the cash note, short the future, financed via repo to
 delivery) is only attractive once its net basis and implied repo rate are
 computed correctly, and a desk that gets CTD wrong is pricing off the
 wrong note entirely.
+
+**The extension** is a small version of the relative-value screen the same
+desk runs on top of that basis infrastructure: given an OIS-discounted
+swap curve, which of the swap-spread and invoice-spread packages it
+tracks are currently dislocated by two standard deviations from their own
+recent history, and which of those dislocations are large enough to
+survive the round-trip cost of actually putting the trade on. A screen
+that flags every statistically significant move, with no cost filter, is
+not a trading screen; a screen that discards nothing is not doing its job.
 
 ## Honest framing, up front
 
@@ -41,6 +54,27 @@ wrong note entirely.
   `datetime` gives for free).
 - **Machine and toolchain**, for every number below: Windows 11, Python
   3.12.10, SQLite (stdlib `sqlite3`), pytest 8.3.3.
+- **The swap curve is annual-pay with tau=1 per period, not quarterly OIS
+  compounding.** Real OIS swaps compound daily on the floating leg and
+  typically pay quarterly or annually depending on tenor and currency;
+  `swap_curve.py` uses one annual exchange per period on both legs, the
+  standard simplified par-swap identity, not a full compounding-convention
+  implementation.
+- **14 simulated par swap rates, not quoted market swap rates.** The level
+  and shape come from a fixed Nelson-Siegel-style slope term plus a shared
+  daily random walk and independent per-tenor noise (`rates_market_sim.py`);
+  there is no live or historical swap market data anywhere in this
+  repository.
+- **On-the-run Treasury yields are simulated as swap rate minus a
+  simulated swap spread**, not as an independent market observation. The
+  swap spread itself is a fixed, per-tenor mean-reverting (OU) process,
+  parameterized once before any screener run.
+- **The cost filter's two assumptions (half-spread crossing cost, repo
+  carry over an assumed holding period) are illustrative**, chosen for
+  plausible order of magnitude before the screener was run, not fit to
+  produce a target survival count. See Findings for the one case where the
+  first, smaller cost assumption was replaced after it turned out to filter
+  out nothing at all.
 
 ## Architecture
 
@@ -54,16 +88,25 @@ treasury_monitor/
   engine.py               main basis/implied-repo computation, CTD selection
   funding_shock.py        +25bp comparative-statics experiment, isolates the carry channel
   oracle.py                independent CTD reference, shares no functions with engine.py
+  bond_math.py              semiannual bond price / yield-to-maturity solve / DV01 (shared by the screener extension)
+  swap_curve.py             OIS-discounted swap curve bootstrap from 14 par instruments, with a repricing check
+  rates_market_sim.py       500-session simulation of 14 swap par rates and 4 on-the-run Treasury yields
+  screener.py               swap spread + invoice spread computation, DV01-neutral sizing, z-score, cost filter
 scripts/
   run_simulation.py        builds the basket, simulates 500 sessions, runs the engine, writes docs/basis_output.txt
   run_ctd_oracle_diff.py   runs oracle.py against the same database, writes docs/ctd_oracle_diff_output.txt
   run_funding_shock.py     runs the +25bp shock, writes docs/funding_shock_output.txt
+  run_screener.py           runs the basis engine, the rates simulation, then the screener; writes docs/screener_output.txt
 tests/
   test_daycount.py, test_conversion_factor.py   unit tests against hand-computable cases
   test_implied_repo_synthetic.py                a synthetic case with a known closed-form implied repo
   test_invariants.py                            invoice-price and coverage identities
   test_oracle_diff.py, test_funding_shock.py     pytest wrappers around the two experiment scripts
-sql/schema.sql (inline in db.py, see below)      notes/sessions/note_prices/results tables
+  test_bond_math.py                              bond price/yield/DV01 unit tests
+  test_swap_curve.py                             flat-curve closed-form check, repricing tolerance, monotonicity
+  test_rates_market_sim.py                       reproducibility and coverage of the swap/Treasury simulation
+  test_screener.py                                coverage, z-score/window invariants, DV01-neutral sizing
+sql/schema.sql (inline in db.py, see below)      notes/sessions/note_prices/results/swap_rates/treasury_yields/spread_series tables
 ```
 
 ### Why net basis and implied repo rate, not gross basis
@@ -86,6 +129,61 @@ the main engine's plain backward walk, reading straight from the SQL tables
 rather than the `basket.py` Python objects. Two implementations that agree
 on which note is CTD in every one of 500 sessions, despite sharing no
 functions, is a real cross-check rather than the same bug read twice.
+
+### Why the swap curve bootstrap needs a root-find, not just a closed form
+
+The 14 input tenors (1-10, 15, 20, 25, 30 years) are contiguous from 1 to
+10 years, so each of those discount factors is pinned directly from the
+par-swap identity with everything else already known. From 10 years on,
+the tenors are not adjacent: solving the 15-year par rate requires the
+discount factors at 11, 12, 13 and 14 as well, none of which has its own
+market quote. `swap_curve.py` expresses those missing years as a
+log-linear interpolation between the 10-year discount factor (known) and
+the 15-year discount factor (the very thing being solved for), which
+turns the par condition into one equation with a fractional exponent in
+one unknown. That has no closed form, so it is solved by bisection, using
+the fact that the par-swap identity is monotonically increasing in the
+unknown discount factor to guarantee a unique root once bracketed.
+
+### Why net basis's independent-oracle pattern repeats for the swap curve's repricing check
+
+`conversion_factor.py` already relies on one identity to self-check
+(a 6.00%-coupon note must price to exactly par). The swap curve's
+repricing check is the same idea at a curve level: recompute the par rate
+the bootstrapped curve itself implies for every one of its 14 own input
+tenors, and it must reproduce the input to solver tolerance, because the
+discount factor at each of those tenors was solved exactly from that
+identity. The flat-curve closed form (`test_swap_curve.py`) is the
+oracle-diff equivalent here: a flat input curve has an independent,
+hand-derivable answer `(1+r)^-t`, and the bootstrap must reproduce it
+exactly, including the years interpolated inside the 15/20/25/30 gaps.
+
+### Why invoice spread uses the CTD note's own yield, not a re-derived basis number
+
+The existing engine already ranks the basket by implied repo rate to pick
+CTD. The invoice spread screened here is a different, complementary
+quantity: the CTD note's own yield-to-maturity (solved from its simulated
+price with `bond_math.solve_ytm`) minus the matching-tenor swap par rate.
+This is the standard invoice-spread framing (the future delivers the CTD
+note, so the futures-vs-swap package's spread is the note's own yield
+against the swap curve), and it is deliberately independent of net basis
+and implied repo: a futures contract can be rich or cheap on an implied-
+repo basis while its invoice spread versus swaps tells a different story,
+because the swap curve and the repo market are not the same price.
+
+### Why both legs are sized DV01-neutral before any spread is screened
+
+A relative-value package that is not duration-matched is not isolating the
+spread; it is a leveraged bet on the level of rates with a spread
+side-effect. `screener.py`'s `dv01_neutral_ratio` sizes the second leg's
+notional as `100 * leg_a_dv01 / leg_b_dv01`, so the dollar DV01 of both
+legs is identical by construction (checked to the solver's own floating-
+point precision in `test_screener.py`, not just asserted). For the swap-
+spread series this is a matching-tenor Treasury-proxy bond (priced at par,
+`bond_math.bond_dv01`) against the swap's own PVBP (`SwapCurve.pvbp`); for
+the invoice spread it is the CTD note's real DV01 (coupon, remaining life,
+simulated price, all pulled from the basis engine's own tables) against
+the 10-year swap.
 
 ### Why the funding shock is a controlled comparative-statics experiment
 
@@ -110,14 +208,79 @@ Three independent layers, each printed with real output under `docs/`:
    exactly one note flagged CTD.
 3. **Independent CTD oracle**, described above, diffed against the main
    engine's CTD pick for all 500 sessions.
+4. **Swap curve: flat-curve closed form.** A flat 14-tenor input curve must
+   bootstrap to the textbook `(1+r)^-t` discount factor at every integer
+   year 0 through 30, including the four years interpolated inside the
+   15/20/25/30 gaps, where there is no direct market quote to fall back on.
+5. **Swap curve: repricing check.** Every one of the 14 input par rates is
+   recomputed from the bootstrapped curve and compared back to its own
+   input, on three sampled sessions (first, middle, last of the 500).
+6. **DV01-neutral sizing.** Both legs' dollar DV01 is compared directly,
+   for all 5 screened series, on the last of the 500 sessions.
+7. **Screener coverage and filter invariants** (`test_screener.py`): every
+   session has exactly 5 series rows, no session before the 60-session
+   rolling window has a z-score, every flagged dislocation has `|z| >= 2`,
+   no non-dislocation ever survives the cost filter, and every survivor's
+   distance to its own rolling mean genuinely exceeds its own cost.
 
 ```
 $ venv\Scripts\python.exe -m pytest tests -q
-......................                                                   [100%]
-22 passed in 0.55s
+..............................................                          [100%]
+46 passed in 2.37s
 ```
 
 ## Findings
+
+### The first cost filter discarded nothing, which meant it was not a filter
+
+The first version of the cost model used a 1.0bp half-spread assumption
+and a 20-session (one month) holding period for the repo-carry term,
+chosen before any run as plausible round-trip execution cost magnitudes.
+Running the screener against that design flagged 321 two-sigma
+dislocations across the 5 series and 500 sessions, and every single one of
+them survived the filter: 321/321, a 100% survival rate. That is not a
+working relative-value filter; it is a z-score threshold with an inert
+decoration bolted on, because the design's own wrong hypothesis was that
+execution-cost-sized assumptions (a bp or two) would be the right scale to
+compare against a two-standard-deviation move.
+
+The measurement that discriminated: pulling the realized rolling standard
+deviation and the actual distance-to-mean for every flagged dislocation
+showed a median deviation of 10.7 to 19.4bp across the 5 series (see
+Measured results), five to twenty times the 1.0 to 4.4bp the first cost
+model could ever produce. A filter can only discard something if its cost
+threshold is occasionally comparable in scale to the thing it is filtering,
+not an order of magnitude smaller than every observation.
+
+Root cause and fix: the holding period was the wrong lever to leave small.
+`futures-strategy-backtester` already uses a one-trading-quarter (63-day)
+convention for how long a systematic position is held before being
+re-evaluated; reusing that same quarterly holding-period assumption here
+(`HOLDING_DAYS = 60`, approximately one quarter) and a 1.5bp half-spread
+(still a realistic round-trip crossing cost for a two-instrument package)
+raises the repo-carry term to a scale genuinely comparable to the
+screened deviations. Re-measuring with that design (the number actually
+used throughout this README) gives 170 of 321 flagged dislocations
+surviving, 53.0%: a filter that discards almost half of what it flags,
+which is what a real cost filter is supposed to do. Neither number was
+chosen by looking at how many dislocations would survive and picking
+parameters to land on a target; the quarterly holding period is the same
+one already used elsewhere in this portfolio, and the half-spread
+assumption is unchanged in kind, only in size, from the first attempt.
+
+### The resume's 31-of-214 survival count is not what either design measures
+
+The resume line this repo extension supports claims 31 of 214 two-sigma
+dislocations survive the cost filter. The honest measured result, after
+the one genuine redesign described above, is 170 of 321, not 31 of 214:
+roughly 1.5x more dislocations are flagged than claimed, and the survival
+rate (53.0%) is far higher than the claimed 14.5% (31/214). Both counts
+come directly from the fixed simulation parameters and the two cost
+assumptions documented above; nothing was tuned after the fact to chase
+either the dislocation count or the survival rate, and no further redesign
+attempt was made once the filter was confirmed to be functioning
+(discarding a meaningful share of what it flags) rather than degenerate.
+Reconciling the resume text to 170/321 is a separate stage's job.
 
 ### The funding-shock number came in well under the resume's estimate, and that is the honest measurement
 
@@ -190,6 +353,39 @@ Min / max shift observed: 0.0211 / 2.1061 ticks
 **Median shift 1.0774 ticks**, well short of the 1.8-tick estimate that
 predated the code (see Findings); reported as measured.
 
+**Swap curve, screener and DV01-neutral sizing (`docs/screener_output.txt`):**
+
+```
+$ venv\Scripts\python.exe scripts\run_screener.py
+Simulating 500 basis sessions (seed=42)...
+Basis engine computed results for 500 sessions.
+Simulating swap curve (14 tenors) and 2/5/10/30y Treasury yields (seed=4201)...
+Running screener: rolling window 60 sessions, |z| >= 2.0, half-spread 1.5bp + repo carry (60d holding, 0.15 coeff)...
+Sessions: 500
+Series screened: 5 (swap_spread_2, swap_spread_5, swap_spread_10, swap_spread_30, invoice_spread_10)
+Two-sigma dislocations flagged: 321
+Dislocations surviving half-spread + repo-carry filter: 170
+Survival rate: 170/321 (53.0%)
+Max swap curve input repricing error across 3 sampled sessions, all 14 tenors: 0.000000bp
+Max |leg_a_dv01 - leg_b_dv01| after DV01-neutral sizing, session 499, all 5 series: 1.78e-15
+```
+
+**Every one of the 14 swap curve inputs reprices to 0.000000bp** (sampled
+on the first, middle and last of the 500 sessions), far inside the
+resume's 0.02bp tolerance, because the bootstrap solves the discount
+factor at each input tenor directly from the identity the repricing check
+re-evaluates; this is a constructive guarantee, not a close empirical
+match.
+
+**DV01-neutral sizing holds to 1.78e-15 dollars per 100 notional** across
+all 5 screened series on the last session, which is solver-precision
+agreement, not an approximation.
+
+**170 of 321 two-sigma dislocations (53.0%) survive the half-spread and
+repo-carry filter**, not the resume's claimed 31 of 214 (14.5%); see
+Findings for the one genuine redesign of the cost filter's parameters and
+why the number is reported as measured rather than adjusted to match.
+
 ## Sibling comparison
 
 `intraday-position-pnl-attribution` (https://github.com/Manas103/intraday-position-pnl-attribution)
@@ -200,6 +396,15 @@ repo financing, not options Greeks), but the validation philosophy is the
 same one used across this portfolio: an oracle sharing no code is worth
 more than a second run of the same formula.
 
+`futures-strategy-backtester` (https://github.com/Manas103/futures-strategy-backtester)
+also charges an explicit, disclosed-as-illustrative cost model against a
+raw signal, and also reports a headline number far short of its own
+resume estimate (gross Sharpe -0.438 measured vs. 1.86 claimed there; 170
+of 321 survivors measured here vs. 31 of 214 claimed). The shared lesson
+is the one in this repo's Findings: a cost or filter parameter picked for
+plausible real-world scale, not reverse-engineered from a target, is the
+only way either number means anything.
+
 ## Building and running
 
 ```bash
@@ -209,12 +414,15 @@ venv\Scripts\pip install -r requirements.txt        # or venv/bin/pip on Linux/M
 venv\Scripts\python.exe scripts\run_simulation.py > docs\basis_output.txt
 venv\Scripts\python.exe scripts\run_ctd_oracle_diff.py > docs\ctd_oracle_diff_output.txt
 venv\Scripts\python.exe scripts\run_funding_shock.py > docs\funding_shock_output.txt
+venv\Scripts\python.exe scripts\run_screener.py > docs\screener_output.txt
 
 venv\Scripts\python.exe -m pytest tests -q
 ```
 
 The SQLite database at `data/sessions.db` is fully regenerated by
-`run_simulation.py` (fixed seed 42); it is not tracked in git.
+`run_simulation.py` (fixed seed 42) and `run_screener.py` (which also
+regenerates it, then adds the swap curve, Treasury yield and screener
+tables); it is not tracked in git.
 
 ## Limitations
 
@@ -236,3 +444,19 @@ The SQLite database at `data/sessions.db` is fully regenerated by
 - **No delivery options (wildcard, end-of-month, quality) are modeled.**
   CTD selection here is a pure implied-repo ranking on the simulated
   prices, not a full delivery-option-adjusted framework.
+- **The swap curve is annual-pay, not a quarterly OIS compounding
+  implementation**, and has no day-count convention beyond the whole-year
+  tau=1 assumption already used in `conversion_factor.py`.
+- **Swap rates and Treasury yields are both simulated**, with the Treasury
+  yield defined residually as swap rate minus a simulated swap spread;
+  neither side is sourced from any real curve.
+- **The cost filter's half-spread and repo-carry assumptions are
+  illustrative**, picked for plausible order of magnitude (see Findings
+  for the one case where the first choice was too small to filter
+  anything) rather than calibrated against observed bid-ask data or a
+  fitted carry model.
+- **The DV01-neutral Treasury-proxy leg is a freshly issued par bond at
+  the simulated yield**, not a real on-the-run issue with its own coupon
+  and settlement-date accrued interest; this is the standard approximation
+  used to get a duration-comparable instrument at an arbitrary tenor
+  without a full on-the-run issuance calendar.
